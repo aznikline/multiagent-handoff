@@ -1,6 +1,13 @@
 """S3-backed storage for context packages.
 
-Supports SSE encryption and presigned URLs for secure retrieval.
+Requires ``aiobotocore``. Sync boto3 is **not** supported because all
+store methods are async.
+
+The expected ``s3_client`` is an aiobotocore ``AioBaseClient`` obtained
+via ``session.create_client("s3", ...)``.
+
+Note: S3 support is functional but not yet covered by automated integration
+tests against a real S3 endpoint. Use with appropriate validation.
 """
 
 from __future__ import annotations
@@ -13,10 +20,17 @@ from handoff.serialization.serializer import JsonSerializer
 
 
 class S3HandoffStore(HandoffStore):
-    """Production-grade S3 store using boto3/aiobotocore.
+    """S3 store using aiobotocore.
 
-    Requires ``boto3`` or ``aiobotocore``. For async support,
-    aiobotocore is preferred.
+    Requires ``aiobotocore``. For async support,
+    aiobotocore is **required**; sync boto3 will not work.
+
+    Expected client interface (aiobotocore AioBaseClient):
+        - await client.put_object(Bucket=..., Key=..., Body=..., ...)
+        - response = await client.get_object(Bucket=..., Key=...)
+          data = await response["Body"].read()
+        - await client.delete_object(Bucket=..., Key=...)
+        - url = await client.generate_presigned_url(...)
     """
 
     def __init__(
@@ -56,8 +70,8 @@ class S3HandoffStore(HandoffStore):
         try:
             key = self._key(package_id)
             response = await self._s3.get_object(Bucket=self._bucket, Key=key)
-            async with response["Body"] as stream:
-                data = await stream.read()
+            # aiobotocore StreamingBody supports direct .read()
+            data: bytes = await response["Body"].read()
             return self._serializer.deserialize(data)
         except Exception as exc:
             # Check for 404

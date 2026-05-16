@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 from handoff.models.package import ContextPackage
@@ -9,31 +11,37 @@ from handoff.orchestrator.store import HandoffStore, StoreError
 from handoff.serialization.serializer import JsonSerializer
 
 
+# Strict SQL identifier: letters, digits, underscores; must start with letter or underscore
+_VALID_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def _validate_table_name(name: str) -> str:
+    """Validate a table name to prevent SQL injection.
+
+    Args:
+        name: Proposed table name.
+
+    Returns:
+        The validated name.
+
+    Raises:
+        ValueError: If the name is not a valid SQL identifier.
+    """
+    if not _VALID_IDENTIFIER.match(name):
+        raise ValueError(
+            f"Invalid table name: {name!r}. "
+            "Must match ^[a-zA-Z_][a-zA-Z0-9_]*$"
+        )
+    return name
+
+
 class PostgresHandoffStore(HandoffStore):
     """Production-grade PostgreSQL store with automatic table management.
 
     Requires ``asyncpg>=0.29``.
-    """
 
-    TABLE_DDL = """
-    CREATE TABLE IF NOT EXISTS handoff_packages (
-        package_id      TEXT PRIMARY KEY,
-        trace_id        TEXT NOT NULL,
-        spec_version    TEXT NOT NULL,
-        source_agent    TEXT NOT NULL,
-        handoff_reason  TEXT NOT NULL,
-        priority        TEXT NOT NULL,
-        payload_json    JSONB NOT NULL,
-        expires_at      TIMESTAMPTZ,
-        created_at      TIMESTAMPTZ DEFAULT NOW(),
-        sanitized       BOOLEAN DEFAULT FALSE,
-        classification  TEXT DEFAULT 'internal'
-    );
-    CREATE INDEX IF NOT EXISTS idx_handoff_expires
-        ON handoff_packages(expires_at)
-        WHERE expires_at IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS idx_handoff_trace
-        ON handoff_packages(trace_id);
+    The table name is validated on init to prevent SQL injection.
+    Custom table names are supported but must be valid SQL identifiers.
     """
 
     def __init__(
@@ -43,13 +51,36 @@ class PostgresHandoffStore(HandoffStore):
     ) -> None:
         super().__init__()
         self._pool = pool
-        self._table = table_name
+        self._table = _validate_table_name(table_name)
         self._serializer = JsonSerializer()
+
+    def _ddl(self) -> str:
+        """Generate DDL using the validated table name."""
+        return f"""
+        CREATE TABLE IF NOT EXISTS {self._table} (
+            package_id      TEXT PRIMARY KEY,
+            trace_id        TEXT NOT NULL,
+            spec_version    TEXT NOT NULL,
+            source_agent    TEXT NOT NULL,
+            handoff_reason  TEXT NOT NULL,
+            priority        TEXT NOT NULL,
+            payload_json    JSONB NOT NULL,
+            expires_at      TIMESTAMPTZ,
+            created_at      TIMESTAMPTZ DEFAULT NOW(),
+            sanitized       BOOLEAN DEFAULT FALSE,
+            classification  TEXT DEFAULT 'internal'
+        );
+        CREATE INDEX IF NOT EXISTS idx_{self._table}_expires
+            ON {self._table}(expires_at)
+            WHERE expires_at IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_{self._table}_trace
+            ON {self._table}(trace_id);
+        """
 
     async def ensure_schema(self) -> None:
         """Create the table and indexes if they don't exist."""
         async with self._pool.acquire() as conn:
-            await conn.execute(self.TABLE_DDL)
+            await conn.execute(self._ddl())
 
     async def save(self, package: ContextPackage) -> None:
         try:
@@ -96,9 +127,12 @@ class PostgresHandoffStore(HandoffStore):
                 if row is None:
                     return None
                 payload = row["payload_json"]
-                if isinstance(payload, dict):
-                    payload = str(payload)
-                return self._serializer.deserialize(payload.encode("utf-8"))
+                # asyncpg may return dict/list for JSONB; normalize to JSON string
+                if isinstance(payload, (dict, list)):
+                    payload = json.dumps(payload)
+                if isinstance(payload, str):
+                    payload = payload.encode("utf-8")
+                return self._serializer.deserialize(payload)
         except Exception as exc:
             raise StoreError(f"Postgres load failed: {exc}") from exc
 

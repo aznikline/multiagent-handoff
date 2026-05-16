@@ -38,6 +38,23 @@ app = typer.Typer(
 )
 
 
+def _normalize_reason(reason: str) -> str:
+    """Map legacy/alias reason values to valid HandoffReason enum values.
+
+    Args:
+        reason: Raw reason string from user input.
+
+    Returns:
+        Normalized reason string valid for HandoffReason.
+    """
+    aliases = {
+        "manual": "user_triggered",
+        "rate_limit": "user_triggered",
+        "error": "error_recovery",
+    }
+    return aliases.get(reason, reason)
+
+
 def _get_store() -> LocalHandoffStore:
     """Get or create the local handoff store."""
     return LocalHandoffStore()
@@ -50,7 +67,9 @@ def init(
     ),
     agent: str = typer.Option(
         "claude-code", "--agent", "-a",
-        help="Primary agent type (claude-code, opencode, codex-cli)",
+        help="Primary agent type (claude-code, codex-cli, opencode). "
+             "Claude Code has the richest support (hooks, injection). "
+             "Codex and OpenCode use generic session parsing.",
     ),
 ) -> None:
     """Initialize handoff configuration for a project."""
@@ -94,7 +113,7 @@ def init(
 def create(
     source: str = typer.Option(
         ..., "--source", "-s",
-        help="Source agent (claude-code, opencode, codex-cli)",
+        help="Source agent (claude-code, codex-cli, opencode)",
     ),
     task: str = typer.Option(
         ..., "--task", "-t",
@@ -102,7 +121,8 @@ def create(
     ),
     reason: str = typer.Option(
         "user_triggered", "--reason", "-r",
-        help="Handoff reason (token_limit, rate_limit, user_triggered, error_recovery, capability_mismatch, scheduled)",
+        help="Handoff reason (token_limit, user_triggered, error_recovery, capability_mismatch, scheduled). "
+             "Legacy aliases: manual → user_triggered, error → error_recovery.",
     ),
     notes: str = typer.Option(
         "", "--notes", "-n",
@@ -111,12 +131,13 @@ def create(
 ) -> None:
     """Create a handoff package from the current session."""
     store = _get_store()
+    normalized_reason = HandoffReason(_normalize_reason(reason))
 
     if source == "claude-code":
         adapter = ClaudeCodeAdapter(store=store)
         result = asyncio.run(adapter.create_package(
             task_id=task,
-            reason=HandoffReason(reason),
+            reason=normalized_reason,
             notes=notes,
         ))
     else:
@@ -130,7 +151,7 @@ def create(
         package = ContextPackage(
             meta=PackageMeta(
                 source=SourceInfo(agent_id=source),
-                handoff_reason=HandoffReason(reason),
+                handoff_reason=normalized_reason,
             ),
             task=TaskInfo(
                 original_task_id=task,
@@ -197,7 +218,7 @@ def inject(
     package_id: str = typer.Argument(..., help="Package ID to inject"),
     target: str = typer.Option(
         ..., "--target", "-t",
-        help="Target agent (claude-code, opencode, codex-cli)",
+        help="Target agent (claude-code, codex-cli, opencode)",
     ),
     project_dir: Path = typer.Option(
         Path.cwd(), "--project-dir", "-d",
