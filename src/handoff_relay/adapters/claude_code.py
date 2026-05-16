@@ -79,6 +79,26 @@ class ClaudeCodeAdapter:
             "message_count": len(snapshot.messages),
         }
 
+    def _resolve_claude_md(self, project: Path) -> Path:
+        """Resolve the real CLAUDE.md path, avoiding symlink to AGENTS.md.
+
+        If CLAUDE.md is a symlink to AGENTS.md, returns a separate
+        `.claude/CLAUDE.md` path to avoid polluting the shared file.
+        """
+        claude_md = project / "CLAUDE.md"
+        if claude_md.exists() and claude_md.is_symlink():
+            target = claude_md.readlink()
+            if target.name == "AGENTS.md" or str(target).endswith("AGENTS.md"):
+                # Use a separate file to avoid polluting AGENTS.md
+                separate = project / ".claude" / "CLAUDE.md"
+                separate.parent.mkdir(parents=True, exist_ok=True)
+                if not separate.exists():
+                    separate.write_text(
+                        "# Claude-specific Instructions\n\n", encoding="utf-8"
+                    )
+                return separate
+        return claude_md
+
     def inject_into_claude_md(
         self,
         package_id: str,
@@ -97,7 +117,7 @@ class ClaudeCodeAdapter:
             Path to the CLAUDE.md file.
         """
         project = Path(project_dir)
-        claude_md = project / "CLAUDE.md"
+        claude_md = self._resolve_claude_md(project)
 
         # Create CLAUDE.md if it doesn't exist
         if not claude_md.exists():

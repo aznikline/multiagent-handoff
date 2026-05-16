@@ -33,7 +33,7 @@ async def serve_mcp() -> None:
     async def handoff_create_package(
         source_agent: str,
         task_id: str,
-        reason: str = "manual",
+        reason: str = "user_triggered",
         target_agent_type: str = "any",
         include_full_history: bool = False,
         notes: str = "",
@@ -43,7 +43,7 @@ async def serve_mcp() -> None:
         Args:
             source_agent: Source agent type (claude-code, opencode, codex-cli).
             task_id: Task identifier.
-            reason: Handoff reason (token_limit, rate_limit, manual, error).
+            reason: Handoff reason (token_limit, rate_limit, user_triggered, error_recovery).
             target_agent_type: Preferred target agent for format optimization.
             include_full_history: Include full conversation history.
             notes: Additional handoff notes.
@@ -157,6 +157,9 @@ async def serve_mcp() -> None:
     ) -> dict[str, Any]:
         """Capture the current agent session state for later handoff.
 
+        The captured state is persisted to local storage and can be
+        retrieved via handoff_get_package using the returned capture_id.
+
         Args:
             agent_type: Agent type (opencode, claude-code, codex-cli).
             messages: Recent conversation messages.
@@ -165,26 +168,43 @@ async def serve_mcp() -> None:
             blockers: Current blockers or issues.
 
         Returns:
-            Capture metadata with estimated token count.
+            Capture metadata with capture_id, estimated token count, and status.
         """
         import json
+        import uuid
 
-        payload = {
-            "agent_type": agent_type,
-            "messages": messages,
-            "variables": variables,
-            "current_step": current_step,
-            "blockers": blockers,
-            "timestamp": __import__("handoff._utils").utc_now().isoformat(),
-        }
+        capture_id = f"capture-{uuid.uuid4().hex[:8]}"
 
-        # Estimate tokens (rough approximation: 4 chars per token)
-        estimated_tokens = len(json.dumps(payload)) // 4
+        from handoff.models.package import ContextPackage, PackageMeta, SourceInfo
+        from handoff.models.task import HandoffReason, ProgressSummary, TaskInfo
+
+        package = ContextPackage(
+            meta=PackageMeta(
+                package_id=capture_id,
+                source=SourceInfo(agent_id=agent_type),
+                handoff_reason=HandoffReason.USER_TRIGGERED,
+            ),
+            task=TaskInfo(
+                original_task_id=capture_id,
+                description=current_step or f"{agent_type} captured state",
+                progress_summary=ProgressSummary(
+                    current_step=current_step,
+                    key_intermediate_results=json.dumps(variables)[:500],
+                    blockers="; ".join(blockers) if blockers else "",
+                ),
+            ),
+        )
+
+        await store.save(package)
+
+        payload_size = len(json.dumps(messages)) + len(json.dumps(variables))
+        estimated_tokens = payload_size // 4
 
         return {
-            "capture_id": f"capture-{__import__('uuid').uuid4().hex[:8]}",
+            "capture_id": capture_id,
             "estimated_token_count": estimated_tokens,
             "status": "captured",
+            "package_id": capture_id,
         }
 
     @mcp.tool()

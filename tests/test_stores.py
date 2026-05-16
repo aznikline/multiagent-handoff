@@ -20,7 +20,7 @@ class TestRedisHandoffStore:
         client = FakeRedis()
         store = RedisHandoffStore(redis_client=client, ttl_seconds=3600)
         yield store
-        await client.close()
+        await client.aclose()
 
     @pytest.fixture
     def sample_package(self) -> ContextPackage:

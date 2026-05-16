@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -130,10 +130,37 @@ class LocalHandoffStore:
         self._audit("saved", package.meta.package_id)
 
     async def load(self, package_id: str) -> ContextPackage | None:
-        """Retrieve a context package by ID."""
+        """Retrieve a context package by ID.
+
+        Returns None if the package does not exist or has expired.
+        """
         file_path = self._package_path(package_id)
         if not file_path.exists():
             return None
+
+        # Check SQLite index for expiry before deserializing
+        with sqlite3.connect(self._db_path) as conn:
+            row = conn.execute(
+                "SELECT expires_at FROM packages WHERE package_id = ?",
+                (package_id,),
+            ).fetchone()
+            if row is None:
+                # Index entry missing but file exists — stale file
+                file_path.unlink(missing_ok=True)
+                return None
+            expires_at = row[0]
+            if expires_at is not None:
+                expires = datetime.fromisoformat(expires_at)
+                if utc_now() > expires:
+                    # Expired — clean up
+                    file_path.unlink(missing_ok=True)
+                    conn.execute(
+                        "DELETE FROM packages WHERE package_id = ?",
+                        (package_id,),
+                    )
+                    conn.commit()
+                    self._audit("expired_access", package_id)
+                    return None
 
         with open(file_path, "r", encoding="utf-8") as f:
             payload = f.read()

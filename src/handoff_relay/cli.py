@@ -101,8 +101,8 @@ def create(
         help="Task identifier",
     ),
     reason: str = typer.Option(
-        "manual", "--reason", "-r",
-        help="Handoff reason (token_limit, rate_limit, manual, error)",
+        "user_triggered", "--reason", "-r",
+        help="Handoff reason (token_limit, rate_limit, user_triggered, error_recovery, capability_mismatch, scheduled)",
     ),
     notes: str = typer.Option(
         "", "--notes", "-n",
@@ -239,9 +239,44 @@ def cleanup(
 
 
 @app.command()
+def hook(
+    event: str = typer.Argument(..., help="Hook event (session-stop, session-start, post-tool-use)"),
+    project_dir: Path = typer.Option(
+        Path.cwd(), "--project-dir", "-d",
+        help="Project directory",
+    ),
+) -> None:
+    """Handle Claude Code / agent lifecycle hooks."""
+    store = _get_store()
+
+    if event == "session-stop":
+        # Auto-create a handoff package from the latest session
+        adapter = ClaudeCodeAdapter(store=store)
+        result = asyncio.run(adapter.create_package(
+            task_id="auto-session",
+            reason=HandoffReason.USER_TRIGGERED,
+            notes="Auto-captured on session end via Stop hook",
+        ))
+        typer.echo(f"Auto-saved handoff: {result['package_id']}")
+    elif event == "session-start":
+        # Check for pending handoff packages
+        packages = asyncio.run(store.list_packages(status="pending", limit=5))
+        if packages:
+            typer.echo(f"Found {len(packages)} pending handoff package(s):")
+            for pkg in packages:
+                typer.echo(f"  - {pkg['package_id']} ({pkg['source_agent']})")
+        else:
+            typer.echo("No pending handoff packages.")
+    elif event == "post-tool-use":
+        typer.echo("Post-tool-use hook acknowledged (no action).")
+    else:
+        typer.echo(f"Unknown hook event: {event}", err=True)
+        raise typer.Exit(1)
+
+
+@app.command()
 def serve(
     mcp: bool = typer.Option(True, "--mcp/--no-mcp", help="Expose MCP tools"),
-    port: int = typer.Option(8765, "--port", "-p", help="Server port"),
 ) -> None:
     """Start the handoff-relay server."""
     if mcp:
@@ -258,7 +293,7 @@ def _default_agents_md(agent: str) -> str:
 ## Handoff & Context Relay
 - This project supports context handoff between agents via the Handoff Relay MCP server.
 - When you reach token limits, encounter rate limiting, or are asked to hand off work:
-  1. Run `/handoff-prepare` (or call `handoff_create_package` tool)
+  1. Run `/handoff` (or call `handoff_create_package` tool)
   2. Save the returned package ID
   3. Inform the user: "Handoff package created: {{package_id}}"
 - When resuming work from another agent:
