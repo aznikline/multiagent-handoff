@@ -39,7 +39,14 @@ class TestNormalizeReason:
 class TestClaudeCodeAdapterSymlinkCleanup:
     """Regression tests for symlink-safe CLAUDE.md cleanup."""
 
-    def test_cleanup_removes_from_claude_md_subdirectory(self, tmp_path: Path) -> None:
+    @pytest.fixture
+    def adapter(self, tmp_path: Path) -> ClaudeCodeAdapter:
+        store = LocalHandoffStore(base_dir=tmp_path / "store")
+        return ClaudeCodeAdapter(store=store)
+
+    def test_cleanup_removes_from_claude_md_subdirectory(
+        self, tmp_path: Path, adapter: ClaudeCodeAdapter
+    ) -> None:
         """When CLAUDE.md is a symlink to AGENTS.md, cleanup must target .claude/CLAUDE.md."""
         # Setup: AGENTS.md exists, CLAUDE.md is symlink to it
         agents_md = tmp_path / "AGENTS.md"
@@ -49,7 +56,6 @@ class TestClaudeCodeAdapterSymlinkCleanup:
         claude_md.symlink_to("AGENTS.md")
 
         # Inject handoff block (should go to .claude/CLAUDE.md)
-        adapter = ClaudeCodeAdapter()
         injected_path = adapter.inject_into_claude_md("pkg-123", tmp_path)
 
         # Verify injection went to .claude/CLAUDE.md, not the symlink
@@ -63,12 +69,13 @@ class TestClaudeCodeAdapterSymlinkCleanup:
         assert cleaned is True
         assert HANDOFF_BLOCK_START not in injected_path.read_text(encoding="utf-8")
 
-    def test_cleanup_falls_back_to_regular_claude_md(self, tmp_path: Path) -> None:
+    def test_cleanup_falls_back_to_regular_claude_md(
+        self, tmp_path: Path, adapter: ClaudeCodeAdapter
+    ) -> None:
         """When CLAUDE.md is a regular file, cleanup targets it directly."""
         claude_md = tmp_path / "CLAUDE.md"
         claude_md.write_text("# Project\n\nInstructions.\n", encoding="utf-8")
 
-        adapter = ClaudeCodeAdapter()
         adapter.inject_into_claude_md("pkg-456", tmp_path)
 
         assert HANDOFF_BLOCK_START in claude_md.read_text(encoding="utf-8")
@@ -77,12 +84,13 @@ class TestClaudeCodeAdapterSymlinkCleanup:
         assert cleaned is True
         assert HANDOFF_BLOCK_START not in claude_md.read_text(encoding="utf-8")
 
-    def test_cleanup_returns_false_when_no_block(self, tmp_path: Path) -> None:
+    def test_cleanup_returns_false_when_no_block(
+        self, tmp_path: Path, adapter: ClaudeCodeAdapter
+    ) -> None:
         """Cleanup returns False when no handoff block exists."""
         claude_md = tmp_path / "CLAUDE.md"
         claude_md.write_text("# Project\n\nNo handoff block here.\n", encoding="utf-8")
 
-        adapter = ClaudeCodeAdapter()
         cleaned = adapter.cleanup_claude_md(tmp_path)
         assert cleaned is False
 
