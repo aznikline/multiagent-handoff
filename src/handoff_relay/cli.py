@@ -30,29 +30,13 @@ from handoff.models.task import HandoffReason
 from handoff_relay.adapters.claude_code import ClaudeCodeAdapter
 from handoff_relay.adapters.session_parser import get_parser
 from handoff_relay.storage.local_store import LocalHandoffStore
+from handoff_relay._utils import normalize_reason
 
 app = typer.Typer(
     name="handoff-relay",
     help="Local CLI Agent context handoff coordinator",
     add_completion=False,
 )
-
-
-def _normalize_reason(reason: str) -> str:
-    """Map legacy/alias reason values to valid HandoffReason enum values.
-
-    Args:
-        reason: Raw reason string from user input.
-
-    Returns:
-        Normalized reason string valid for HandoffReason.
-    """
-    aliases = {
-        "manual": "user_triggered",
-        "rate_limit": "user_triggered",
-        "error": "error_recovery",
-    }
-    return aliases.get(reason, reason)
 
 
 def _get_store() -> LocalHandoffStore:
@@ -131,7 +115,7 @@ def create(
 ) -> None:
     """Create a handoff package from the current session."""
     store = _get_store()
-    normalized_reason = HandoffReason(_normalize_reason(reason))
+    normalized_reason = HandoffReason(normalize_reason(reason))
 
     if source == "claude-code":
         adapter = ClaudeCodeAdapter(store=store)

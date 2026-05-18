@@ -150,7 +150,7 @@ class ClaudeCodeAdapter:
             True if a block was removed.
         """
         project = Path(project_dir)
-        claude_md = project / "CLAUDE.md"
+        claude_md = self._resolve_claude_md(project)
 
         if not claude_md.exists():
             return False
@@ -245,7 +245,7 @@ Create a structured handoff package so another agent can continue this work.
 3. Call the `handoff_create_package` MCP tool with:
    - `source_agent`: "claude-code"
    - `task_id`: the identified task ID
-   - `reason`: "token_limit", "rate_limit", or "manual"
+   - `reason`: "token_limit", "user_triggered", "error_recovery", "capability_mismatch", or "scheduled"
    - `notes`: brief summary of completed work and next steps
 4. Report the package ID to the user.
 5. If MCP tools are unavailable, write a handoff summary to `handoff-brief.md` in the project root.

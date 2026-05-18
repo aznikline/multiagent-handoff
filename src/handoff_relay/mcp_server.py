@@ -8,12 +8,19 @@ from __future__ import annotations
 
 from typing import Any
 
-from handoff.models.package import ContextPackage, PackageMeta, SourceInfo
+from handoff.models.context import (
+    AgentState,
+    ConversationMessage,
+    ConversationState,
+    MessageRole,
+)
+from handoff.models.package import ContextBody, ContextPackage, PackageMeta, SourceInfo
 from handoff.models.task import HandoffReason, ProgressSummary, TaskInfo
 
 from handoff_relay.adapters.claude_code import ClaudeCodeAdapter
 from handoff_relay.adapters.session_parser import get_parser
 from handoff_relay.storage.local_store import LocalHandoffStore
+from handoff_relay._utils import normalize_reason
 
 
 async def serve_mcp() -> None:
@@ -55,7 +62,7 @@ async def serve_mcp() -> None:
             adapter = ClaudeCodeAdapter(store=store)
             result = await adapter.create_package(
                 task_id=task_id,
-                reason=HandoffReason(reason),
+                reason=HandoffReason(normalize_reason(reason)),
                 notes=notes,
             )
             return {
@@ -71,7 +78,7 @@ async def serve_mcp() -> None:
         package = ContextPackage(
             meta=PackageMeta(
                 source=SourceInfo(agent_id=source_agent),
-                handoff_reason=HandoffReason(reason),
+                handoff_reason=HandoffReason(normalize_reason(reason)),
             ),
             task=TaskInfo(
                 original_task_id=task_id,
@@ -175,8 +182,20 @@ async def serve_mcp() -> None:
 
         capture_id = f"capture-{uuid.uuid4().hex[:8]}"
 
-        from handoff.models.package import ContextPackage, PackageMeta, SourceInfo
-        from handoff.models.task import HandoffReason, ProgressSummary, TaskInfo
+        def _map_role(role: str) -> MessageRole:
+            try:
+                return MessageRole(role)
+            except ValueError:
+                return MessageRole.ASSISTANT if role in ("assistant", "model", "agent") else MessageRole.USER
+
+        conv_messages = [
+            ConversationMessage(
+                role=_map_role(m.get("role", "user")),
+                content=str(m.get("content", "")),
+                metadata={k: v for k, v in m.items() if k not in ("role", "content")},
+            )
+            for m in messages
+        ]
 
         package = ContextPackage(
             meta=PackageMeta(
@@ -189,9 +208,13 @@ async def serve_mcp() -> None:
                 description=current_step or f"{agent_type} captured state",
                 progress_summary=ProgressSummary(
                     current_step=current_step,
-                    key_intermediate_results=json.dumps(variables)[:500],
+                    key_intermediate_results=f"Captured {len(variables)} state variable(s)",
                     blockers="; ".join(blockers) if blockers else "",
                 ),
+            ),
+            context=ContextBody(
+                conversation=ConversationState(messages=conv_messages),
+                state=AgentState(variables=variables),
             ),
         )
 

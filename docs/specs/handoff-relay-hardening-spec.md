@@ -352,4 +352,3 @@ python -m pip install -e ".[all]"
 - OpenCode and Codex support claims are accurate.
 - Strict warning test passes.
 - README examples match working behavior.
-
