@@ -105,19 +105,8 @@ class TestHandoffCaptureState:
     @pytest.mark.asyncio
     async def test_capture_state_persists_messages_and_variables(self, store: LocalHandoffStore) -> None:
         """Captured messages and variables must be retrievable via handoff_get_package."""
-        # We can't easily run the full MCP server, so test the core logic directly
-        # by importing the tool implementations.  The tools are closures inside
-        # serve_mcp, so instead we replicate the capture logic here and verify
-        # the package shape.
         import uuid
-        from handoff.models.context import (
-            AgentState,
-            ConversationMessage,
-            ConversationState,
-            MessageRole,
-        )
-        from handoff.models.package import ContextBody, ContextPackage, PackageMeta, SourceInfo
-        from handoff.models.task import HandoffReason, ProgressSummary, TaskInfo
+        from handoff_relay.mcp_server import _build_capture_package
 
         capture_id = f"capture-{uuid.uuid4().hex[:8]}"
         messages = [
@@ -130,40 +119,13 @@ class TestHandoffCaptureState:
         current_step = "Implementing feature X"
         blockers = ["API rate limited"]
 
-        def _map_role(role: str) -> MessageRole:
-            try:
-                return MessageRole(role)
-            except ValueError:
-                return MessageRole.ASSISTANT if role in ("assistant", "model", "agent") else MessageRole.USER
-
-        conv_messages = [
-            ConversationMessage(
-                role=_map_role(m.get("role", "user")),
-                content=str(m.get("content", "")),
-                metadata={k: v for k, v in m.items() if k not in ("role", "content")},
-            )
-            for m in messages
-        ]
-
-        package = ContextPackage(
-            meta=PackageMeta(
-                package_id=capture_id,
-                source=SourceInfo(agent_id="claude-code"),
-                handoff_reason=HandoffReason.USER_TRIGGERED,
-            ),
-            task=TaskInfo(
-                original_task_id=capture_id,
-                description=current_step,
-                progress_summary=ProgressSummary(
-                    current_step=current_step,
-                    key_intermediate_results=f"Captured {len(variables)} state variable(s)",
-                    blockers="; ".join(blockers),
-                ),
-            ),
-            context=ContextBody(
-                conversation=ConversationState(messages=conv_messages),
-                state=AgentState(variables=variables),
-            ),
+        package = _build_capture_package(
+            capture_id=capture_id,
+            agent_type="claude-code",
+            messages=messages,
+            variables=variables,
+            current_step=current_step,
+            blockers=blockers,
         )
 
         await store.save(package)
@@ -196,51 +158,17 @@ class TestHandoffCaptureState:
     async def test_capture_state_empty_messages_and_variables(self, store: LocalHandoffStore) -> None:
         """Capture with empty messages/variables should still produce valid package."""
         import uuid
-        from handoff.models.context import (
-            AgentState,
-            ConversationMessage,
-            ConversationState,
-            MessageRole,
-        )
-        from handoff.models.package import ContextBody, ContextPackage, PackageMeta, SourceInfo
-        from handoff.models.task import HandoffReason, ProgressSummary, TaskInfo
+        from handoff_relay.mcp_server import _build_capture_package
 
         capture_id = f"capture-{uuid.uuid4().hex[:8]}"
 
-        def _map_role(role: str) -> MessageRole:
-            try:
-                return MessageRole(role)
-            except ValueError:
-                return MessageRole.ASSISTANT if role in ("assistant", "model", "agent") else MessageRole.USER
-
-        conv_messages = [
-            ConversationMessage(
-                role=_map_role(m.get("role", "user")),
-                content=str(m.get("content", "")),
-                metadata={k: v for k, v in m.items() if k not in ("role", "content")},
-            )
-            for m in []
-        ]
-
-        package = ContextPackage(
-            meta=PackageMeta(
-                package_id=capture_id,
-                source=SourceInfo(agent_id="opencode"),
-                handoff_reason=HandoffReason.USER_TRIGGERED,
-            ),
-            task=TaskInfo(
-                original_task_id=capture_id,
-                description="opencode captured state",
-                progress_summary=ProgressSummary(
-                    current_step="",
-                    key_intermediate_results="Captured 0 state variable(s)",
-                    blockers="",
-                ),
-            ),
-            context=ContextBody(
-                conversation=ConversationState(messages=conv_messages),
-                state=AgentState(variables={}),
-            ),
+        package = _build_capture_package(
+            capture_id=capture_id,
+            agent_type="opencode",
+            messages=[],
+            variables={},
+            current_step="",
+            blockers=[],
         )
 
         await store.save(package)

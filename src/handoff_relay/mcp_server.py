@@ -181,43 +181,14 @@ async def serve_mcp() -> None:
         import uuid
 
         capture_id = f"capture-{uuid.uuid4().hex[:8]}"
-
-        def _map_role(role: str) -> MessageRole:
-            try:
-                return MessageRole(role)
-            except ValueError:
-                return MessageRole.ASSISTANT if role in ("assistant", "model", "agent") else MessageRole.USER
-
-        conv_messages = [
-            ConversationMessage(
-                role=_map_role(m.get("role", "user")),
-                content=str(m.get("content", "")),
-                metadata={k: v for k, v in m.items() if k not in ("role", "content")},
-            )
-            for m in messages
-        ]
-
-        package = ContextPackage(
-            meta=PackageMeta(
-                package_id=capture_id,
-                source=SourceInfo(agent_id=agent_type),
-                handoff_reason=HandoffReason.USER_TRIGGERED,
-            ),
-            task=TaskInfo(
-                original_task_id=capture_id,
-                description=current_step or f"{agent_type} captured state",
-                progress_summary=ProgressSummary(
-                    current_step=current_step,
-                    key_intermediate_results=f"Captured {len(variables)} state variable(s)",
-                    blockers="; ".join(blockers) if blockers else "",
-                ),
-            ),
-            context=ContextBody(
-                conversation=ConversationState(messages=conv_messages),
-                state=AgentState(variables=variables),
-            ),
+        package = _build_capture_package(
+            capture_id=capture_id,
+            agent_type=agent_type,
+            messages=messages,
+            variables=variables,
+            current_step=current_step,
+            blockers=blockers,
         )
-
         await store.save(package)
 
         payload_size = len(json.dumps(messages)) + len(json.dumps(variables))
@@ -263,6 +234,57 @@ async def serve_mcp() -> None:
         }
 
     await mcp.run_stdio_async()
+
+
+def _build_capture_package(
+    capture_id: str,
+    agent_type: str,
+    messages: list[dict[str, Any]],
+    variables: dict[str, Any],
+    current_step: str,
+    blockers: list[str],
+) -> ContextPackage:
+    """Build a ContextPackage from captured agent session state.
+
+    This is a pure helper extracted for testability — tests can call it
+    directly without spinning up the full MCP server.
+    """
+
+    def _map_role(role: str) -> MessageRole:
+        try:
+            return MessageRole(role)
+        except ValueError:
+            return MessageRole.ASSISTANT if role in ("assistant", "model", "agent") else MessageRole.USER
+
+    conv_messages = [
+        ConversationMessage(
+            role=_map_role(m.get("role", "user")),
+            content=str(m.get("content", "")),
+            metadata={k: v for k, v in m.items() if k not in ("role", "content")},
+        )
+        for m in messages
+    ]
+
+    return ContextPackage(
+        meta=PackageMeta(
+            package_id=capture_id,
+            source=SourceInfo(agent_id=agent_type),
+            handoff_reason=HandoffReason.USER_TRIGGERED,
+        ),
+        task=TaskInfo(
+            original_task_id=capture_id,
+            description=current_step or f"{agent_type} captured state",
+            progress_summary=ProgressSummary(
+                current_step=current_step,
+                key_intermediate_results=f"Captured {len(variables)} state variable(s)",
+                blockers="; ".join(blockers) if blockers else "",
+            ),
+        ),
+        context=ContextBody(
+            conversation=ConversationState(messages=conv_messages),
+            state=AgentState(variables=variables),
+        ),
+    )
 
 
 def _format_injectable(package: ContextPackage) -> str:
