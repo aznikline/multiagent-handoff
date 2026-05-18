@@ -106,7 +106,7 @@ class TestHandoffCaptureState:
     async def test_capture_state_persists_messages_and_variables(self, store: LocalHandoffStore) -> None:
         """Captured messages and variables must be retrievable via handoff_get_package."""
         import uuid
-        from handoff_relay.mcp_server import _build_capture_package
+        from handoff_relay._builders import build_capture_package
 
         capture_id = f"capture-{uuid.uuid4().hex[:8]}"
         messages = [
@@ -119,7 +119,7 @@ class TestHandoffCaptureState:
         current_step = "Implementing feature X"
         blockers = ["API rate limited"]
 
-        package = _build_capture_package(
+        package = build_capture_package(
             capture_id=capture_id,
             agent_type="claude-code",
             messages=messages,
@@ -158,11 +158,11 @@ class TestHandoffCaptureState:
     async def test_capture_state_empty_messages_and_variables(self, store: LocalHandoffStore) -> None:
         """Capture with empty messages/variables should still produce valid package."""
         import uuid
-        from handoff_relay.mcp_server import _build_capture_package
+        from handoff_relay._builders import build_capture_package
 
         capture_id = f"capture-{uuid.uuid4().hex[:8]}"
 
-        package = _build_capture_package(
+        package = build_capture_package(
             capture_id=capture_id,
             agent_type="opencode",
             messages=[],

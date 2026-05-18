@@ -234,14 +234,28 @@ class LocalHandoffStore:
                     (row["package_id"],),
                 )
                 count += 1
-                self._audit("expired_cleanup", row["package_id"])
+                self._audit("expired_cleanup", row["package_id"], conn=conn)
 
             conn.commit()
             return count
 
-    def _audit(self, event: str, package_id: str | None = None, details: str = "") -> None:
-        """Write audit log entry."""
-        with sqlite3.connect(self._db_path) as conn:
+    def _audit(
+        self,
+        event: str,
+        package_id: str | None = None,
+        details: str = "",
+        conn: sqlite3.Connection | None = None,
+    ) -> None:
+        """Write audit log entry.
+
+        Args:
+            event: Audit event name.
+            package_id: Related package ID.
+            details: Additional details.
+            conn: Optional existing SQLite connection. If provided, writes
+                through this connection instead of opening a new one.
+        """
+        if conn is not None:
             conn.execute("""
                 INSERT INTO audit_log (timestamp, event, package_id, details)
                 VALUES (?, ?, ?, ?)
@@ -251,7 +265,19 @@ class LocalHandoffStore:
                 package_id,
                 details,
             ))
-            conn.commit()
+            return
+
+        with sqlite3.connect(self._db_path) as inner:
+            inner.execute("""
+                INSERT INTO audit_log (timestamp, event, package_id, details)
+                VALUES (?, ?, ?, ?)
+            """, (
+                utc_now().isoformat(),
+                event,
+                package_id,
+                details,
+            ))
+            inner.commit()
 
     async def get_audit_log(self, limit: int = 100) -> list[dict[str, Any]]:
         """Return recent audit log entries."""

@@ -28,9 +28,8 @@ except ImportError as exc:
 from handoff.models.task import HandoffReason
 
 from handoff_relay.adapters.claude_code import ClaudeCodeAdapter
-from handoff_relay.adapters.session_parser import get_parser
+from handoff_relay.service import HandoffRelayService
 from handoff_relay.storage.local_store import LocalHandoffStore
-from handoff_relay._utils import normalize_reason
 
 app = typer.Typer(
     name="handoff-relay",
@@ -39,9 +38,9 @@ app = typer.Typer(
 )
 
 
-def _get_store() -> LocalHandoffStore:
-    """Get or create the local handoff store."""
-    return LocalHandoffStore()
+def _get_service() -> HandoffRelayService:
+    """Get or create the handoff relay service."""
+    return HandoffRelayService(store=LocalHandoffStore())
 
 
 @app.command()
@@ -114,46 +113,13 @@ def create(
     ),
 ) -> None:
     """Create a handoff package from the current session."""
-    store = _get_store()
-    normalized_reason = HandoffReason(normalize_reason(reason))
-
-    if source == "claude-code":
-        adapter = ClaudeCodeAdapter(store=store)
-        result = asyncio.run(adapter.create_package(
-            task_id=task,
-            reason=normalized_reason,
-            notes=notes,
-        ))
-    else:
-        # Generic path: parse session and create package
-        parser = get_parser(source)
-        snapshot = parser.parse()
-
-        from handoff.models.package import ContextPackage, PackageMeta, SourceInfo
-        from handoff.models.task import ProgressSummary, TaskInfo
-
-        package = ContextPackage(
-            meta=PackageMeta(
-                source=SourceInfo(agent_id=source),
-                handoff_reason=normalized_reason,
-            ),
-            task=TaskInfo(
-                original_task_id=task,
-                description=snapshot.current_task or f"{source} session",
-                progress_summary=ProgressSummary(
-                    current_step=snapshot.last_assistant_message or "",
-                    key_intermediate_results=snapshot.last_user_message or "",
-                    blockers=notes,
-                ),
-            ),
-        )
-        asyncio.run(store.save(package))
-        result = {
-            "package_id": package.meta.package_id,
-            "summary": package.task.progress_summary.to_markdown(),
-            "file_path": str(store._package_path(package.meta.package_id)),
-        }
-
+    service = _get_service()
+    result = asyncio.run(service.create_package(
+        source_agent=source,
+        task_id=task,
+        reason=reason,
+        notes=notes,
+    ))
     typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
 
 
@@ -164,12 +130,13 @@ def list(
     limit: int = typer.Option(20, "--limit", "-l", help="Max results"),
 ) -> None:
     """List handoff packages."""
-    store = _get_store()
-    packages = asyncio.run(store.list_packages(
+    service = _get_service()
+    result = asyncio.run(service.list_packages(
         status=status,
         source_agent=source,
         limit=limit,
     ))
+    packages = result["packages"]
 
     if not packages:
         typer.echo("No packages found.")
@@ -187,14 +154,14 @@ def show(
     package_id: str = typer.Argument(..., help="Package ID to show"),
 ) -> None:
     """Show package details."""
-    store = _get_store()
-    package = asyncio.run(store.load(package_id))
+    service = _get_service()
+    result = asyncio.run(service.get_package(package_id, format="full"))
 
-    if package is None:
-        typer.echo(f"Package not found: {package_id}", err=True)
+    if "error" in result:
+        typer.echo(result["error"], err=True)
         raise typer.Exit(1)
 
-    typer.echo(json.dumps(package.model_dump(), indent=2, ensure_ascii=False, default=str))
+    typer.echo(json.dumps(result["package"], indent=2, ensure_ascii=False, default=str))
 
 
 @app.command()
@@ -218,14 +185,19 @@ def inject(
         typer.echo(f"Injected into {path}")
     else:
         # Generic: generate handoff-brief.md
-        store = _get_store()
-        package = asyncio.run(store.load(package_id))
+        service = _get_service()
+        result = asyncio.run(service.get_package(package_id))
+        if "error" in result:
+            typer.echo(result["error"], err=True)
+            raise typer.Exit(1)
+
+        package = result.get("package")
         if package is None:
             typer.echo(f"Package not found: {package_id}", err=True)
             raise typer.Exit(1)
 
         brief_path = project / "handoff-brief.md"
-        content = _generate_brief_md(package)
+        content = _generate_brief_md_from_dict(package)
         brief_path.write_text(content, encoding="utf-8")
         typer.echo(f"Generated {brief_path}")
 
@@ -238,8 +210,8 @@ def cleanup(
     ),
 ) -> None:
     """Remove expired handoff packages."""
-    store = _get_store()
-    count = asyncio.run(store.cleanup_expired())
+    service = _get_service()
+    count = asyncio.run(service.cleanup_expired())
     typer.echo(f"Cleaned {count} expired packages.")
 
 
@@ -252,11 +224,11 @@ def hook(
     ),
 ) -> None:
     """Handle Claude Code / agent lifecycle hooks."""
-    store = _get_store()
+    service = _get_service()
 
     if event == "session-stop":
         # Auto-create a handoff package from the latest session
-        adapter = ClaudeCodeAdapter(store=store)
+        adapter = ClaudeCodeAdapter(store=service._store)
         result = asyncio.run(adapter.create_package(
             task_id="auto-session",
             reason=HandoffReason.USER_TRIGGERED,
@@ -265,7 +237,8 @@ def hook(
         typer.echo(f"Auto-saved handoff: {result['package_id']}")
     elif event == "session-start":
         # Check for pending handoff packages
-        packages = asyncio.run(store.list_packages(status="pending", limit=5))
+        result = asyncio.run(service.list_packages(status="pending", limit=5))
+        packages = result["packages"]
         if packages:
             typer.echo(f"Found {len(packages)} pending handoff package(s):")
             for pkg in packages:
@@ -311,23 +284,26 @@ def _default_agents_md(agent: str) -> str:
 """
 
 
-def _generate_brief_md(package: Any) -> str:
+def _generate_brief_md_from_dict(package: dict[str, Any]) -> str:
     """Generate a handoff-brief.md for generic target agents."""
-    ps = package.task.progress_summary
+    task = package.get("task", {})
+    ps = task.get("progress_summary", {})
+    meta = package.get("meta", {})
+    completed = ps.get("completed_steps", [])
     return f"""# Handoff Brief
 
 ## Task
-{package.task.description}
+{task.get("description", "N/A")}
 
 ## Progress Summary
-- **Completed**: {', '.join(ps.completed_steps) if ps.completed_steps else 'N/A'}
-- **Current Step**: {ps.current_step or 'N/A'}
-- **Key Results**: {ps.key_intermediate_results or 'N/A'}
-- **Blockers**: {ps.blockers or 'N/A'}
-- **Next Step**: {ps.next_expected_action or 'N/A'}
+- **Completed**: {', '.join(completed) if completed else 'N/A'}
+- **Current Step**: {ps.get('current_step') or 'N/A'}
+- **Key Results**: {ps.get('key_intermediate_results') or 'N/A'}
+- **Blockers**: {ps.get('blockers') or 'N/A'}
+- **Next Step**: {ps.get('next_expected_action') or 'N/A'}
 
 ## Package ID
-`{package.meta.package_id}`
+`{meta.get('package_id', 'N/A')}`
 
 <handoff_context>
 You are resuming work from a previous agent session.
