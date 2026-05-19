@@ -164,10 +164,28 @@ class CodexSessionParser:
                     out.append(child_msg)
 
     def _try_extract_message(self, obj: dict[str, Any]) -> dict[str, Any] | None:
-        """Try to extract a normalized message from a dict."""
-        content = obj.get("content") or obj.get("message") or obj.get("text")
-        if not content:
+        """Try to extract a normalized message from a dict.
+
+        Handles both Codex CLI flat format and Codex Desktop Responses-API
+        nested format where ``content`` is a list of ``{"type": "...", "text": "..."}``.
+        """
+        raw_content = obj.get("content") or obj.get("message") or obj.get("text")
+        if not raw_content:
             return None
+
+        # Desktop format: content is a list of content parts
+        if isinstance(raw_content, list):
+            texts: list[str] = []
+            for part in raw_content:
+                if isinstance(part, dict):
+                    part_text = part.get("text") or part.get("content") or ""
+                    if part_text:
+                        texts.append(str(part_text))
+            if not texts:
+                return None
+            content = "\n".join(texts)
+        else:
+            content = str(raw_content)
 
         role = obj.get("role") or obj.get("actor") or obj.get("type", "unknown")
         # Codex sometimes uses 'output' for assistant responses
@@ -175,8 +193,12 @@ class CodexSessionParser:
             role = "assistant"
         elif role in ("input", "prompt"):
             role = "user"
+        elif role == "agent_message":
+            role = "assistant"
+        elif role == "developer":
+            role = "system"
 
-        return {"role": role, "content": str(content)}
+        return {"role": role, "content": content}
 
 
 class OpenCodeSessionParser:
