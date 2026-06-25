@@ -1,4 +1,4 @@
-# Agent Context Handoff
+# Multiagent Handoff
 
 Implementation of the **Agent Context Packaging & Handoff Specification v1.0** with local CLI agent relay support.
 

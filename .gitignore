@@ -138,3 +138,8 @@ Thumbs.db
 
 # Claude
 .claude/
+
+# Handoff runtime artifacts (injected context, switch markers, briefs)
+AGENTS.md
+handoff-brief.md
+.handoff/
