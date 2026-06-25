@@ -17,9 +17,11 @@ from handoff_relay._builders import (
     build_capture_package,
     format_injectable,
     format_system_prompt_addition,
+    generate_brief_md_from_dict,
 )
-from handoff_relay._utils import normalize_reason
+from handoff_relay._utils import detect_current_agent, normalize_reason
 from handoff_relay.adapters.claude_code import ClaudeCodeAdapter
+from handoff_relay.adapters.codex import CodexAdapter
 from handoff_relay.adapters.session_parser import get_parser
 from handoff_relay.storage.local_store import LocalHandoffStore
 
@@ -222,6 +224,92 @@ class HandoffRelayService:
             Number of packages removed.
         """
         return await self._store.cleanup_expired()
+
+    async def switch(
+        self,
+        target_agent: str,
+        task_id: str | None = None,
+        notes: str = "",
+        project_dir: Path | str | None = None,
+        source_agent: str | None = None,
+    ) -> dict[str, Any]:
+        """Switch from the current agent to a target agent.
+
+        Auto-detects the currently active agent, creates a handoff package,
+        injects context into the target agent's config, and returns launch
+        instructions.
+
+        Args:
+            target_agent: Target agent type ("claude-code", "codex-cli", "opencode").
+            task_id: Task identifier. If None, auto-generated from source agent.
+            notes: Additional handoff notes.
+            project_dir: Project directory for context injection.
+            source_agent: Optional explicit source agent override. If None,
+                auto-detected from session directories.
+
+        Returns:
+            Switch result dict with package_id, source_agent, target_agent,
+            injected_path, and launch_command.
+        """
+        if source_agent is None:
+            source_agent = detect_current_agent()
+        if source_agent is None:
+            return {"error": "No active agent session detected."}
+
+        if source_agent == target_agent:
+            return {"error": f"Source and target agent are the same: {target_agent}"}
+
+        resolved_task_id = task_id or f"switch-{source_agent}-to-{target_agent}"
+
+        # Create handoff package from source agent
+        pkg_result = await self.create_package(
+            source_agent=source_agent,
+            task_id=resolved_task_id,
+            reason="capability_mismatch",
+            notes=notes,
+        )
+        package_id = pkg_result["package_id"]
+
+        # Inject context into target agent's config
+        project = Path(project_dir) if project_dir else Path.cwd()
+        injected_path: Path | None = None
+
+        if target_agent == "claude-code":
+            adapter = ClaudeCodeAdapter()
+            injected_path = adapter.inject_into_claude_md(package_id, project)
+        elif target_agent == "codex-cli":
+            adapter = CodexAdapter()
+            injected_path = adapter.inject_into_agents_md(package_id, project)
+        elif target_agent == "opencode":
+            # Generic: write handoff-brief.md
+            brief_path = project / "handoff-brief.md"
+            pkg = await self.get_package(package_id, format="full")
+            if "package" in pkg:
+                brief_path.write_text(
+                    generate_brief_md_from_dict(pkg["package"]),
+                    encoding="utf-8",
+                )
+            injected_path = brief_path
+
+        # Build launch command
+        if target_agent == "claude-code":
+            launch_cmd = f"cd {project} && claude"
+        elif target_agent == "codex-cli":
+            launch_cmd = f"cd {project} && codex"
+        elif target_agent == "opencode":
+            launch_cmd = f"cd {project} && opencode"
+        else:
+            launch_cmd = f"cd {project} && <{target_agent}>"
+
+        return {
+            "package_id": package_id,
+            "source_agent": source_agent,
+            "target_agent": target_agent,
+            "task_id": resolved_task_id,
+            "injected_path": str(injected_path) if injected_path else None,
+            "project_dir": str(project),
+            "launch_command": launch_cmd,
+        }
 
     # ------------------------------------------------------------------ #
     # Project-level operations (not package-centric)

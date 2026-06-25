@@ -93,4 +93,17 @@ async def serve_mcp() -> None:
             max_tokens=max_tokens,
         )
 
+    @mcp.tool()
+    async def handoff_switch(
+        target_agent: str,
+        task_id: str = "",
+        notes: str = "",
+    ) -> dict[str, Any]:
+        """Switch from current agent to target agent with context handoff."""
+        return await service.switch(
+            target_agent=target_agent,
+            task_id=task_id or None,
+            notes=notes,
+        )
+
     await mcp.run_stdio_async()

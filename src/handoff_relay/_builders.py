@@ -96,3 +96,31 @@ def format_system_prompt_addition(package: ContextPackage) -> str:
         f"Current step: {ps.current_step or 'N/A'}. "
         f"Next expected action: {ps.next_expected_action or 'Continue task execution'}."
     )
+
+
+def generate_brief_md_from_dict(package: dict[str, Any]) -> str:
+    """Generate a handoff-brief.md for generic target agents."""
+    task = package.get("task", {})
+    ps = task.get("progress_summary", {})
+    meta = package.get("meta", {})
+    completed = ps.get("completed_steps", [])
+    return f"""# Handoff Brief
+
+## Task
+{task.get("description", "N/A")}
+
+## Progress Summary
+- **Completed**: {', '.join(completed) if completed else 'N/A'}
+- **Current Step**: {ps.get('current_step') or 'N/A'}
+- **Key Results**: {ps.get('key_intermediate_results') or 'N/A'}
+- **Blockers**: {ps.get('blockers') or 'N/A'}
+- **Next Step**: {ps.get('next_expected_action') or 'N/A'}
+
+## Package ID
+`{meta.get('package_id', 'N/A')}`
+
+<handoff_context>
+You are resuming work from a previous agent session.
+Review the progress summary above and continue from the indicated next step.
+</handoff_context>
+"""

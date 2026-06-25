@@ -189,6 +189,40 @@ class TestClaudeCodeFakeSessionFlow:
         assert cleaned is True
         assert package_id not in claude_md.read_text(encoding="utf-8")
 
+    @pytest.mark.asyncio
+    async def test_empty_snapshot_notes_elevated(
+        self,
+        service: HandoffRelayService,
+        tmp_path: Path,
+    ) -> None:
+        """When session has no messages, notes become the primary content."""
+        from handoff_relay.adapters.session_parser import ClaudeCodeSessionParser
+
+        # Empty session dir — parser returns empty snapshot
+        session_dir = tmp_path / "empty_sessions"
+        session_dir.mkdir()
+
+        adapter = ClaudeCodeAdapter(
+            store=service._store,
+            session_dir=session_dir,
+        )
+        result = await adapter.create_package(
+            task_id="no-session-task",
+            reason=HandoffReason.USER_TRIGGERED,
+            notes="Working on auth refactor, need to add OAuth2 flow",
+        )
+        package_id = result["package_id"]
+
+        # Load the saved package and verify notes were elevated
+        loaded = await service.get_package(package_id, format="full")
+        pkg = loaded["package"]
+        ps = pkg["task"]["progress_summary"]
+
+        assert ps["current_step"] == "Working on auth refactor, need to add OAuth2 flow"
+        assert ps["key_intermediate_results"] == ""
+        assert ps["blockers"] == ""
+        assert pkg["task"]["description"] == "Working on auth refactor, need to add OAuth2 flow"
+
 
 class TestCodexJSONLFixture:
     """Codex JSONL parsing with fixture data."""

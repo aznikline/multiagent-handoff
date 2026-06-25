@@ -27,6 +27,8 @@ except ImportError as exc:
 
 from handoff.models.task import HandoffReason
 
+from handoff_relay._builders import generate_brief_md_from_dict
+from handoff_relay._utils import is_inside_tmux, write_switch_marker
 from handoff_relay.adapters.claude_code import ClaudeCodeAdapter
 from handoff_relay.service import HandoffRelayService
 from handoff_relay.storage.local_store import LocalHandoffStore
@@ -90,6 +92,10 @@ def init(
     typer.echo(f"  Created {handoff_dir}")
 
     typer.echo("Done. Add your project-specific instructions to AGENTS.md.")
+    typer.echo("")
+    typer.echo("Next step for seamless switching:")
+    typer.echo("  handoff-relay install-shell-hook")
+    typer.echo("  # Then restart your terminal or run: source ~/.zshrc  (or ~/.bashrc)")
 
 
 @app.command()
@@ -197,7 +203,7 @@ def inject(
             raise typer.Exit(1)
 
         brief_path = project / "handoff-brief.md"
-        content = _generate_brief_md_from_dict(package)
+        content = generate_brief_md_from_dict(package)
         brief_path.write_text(content, encoding="utf-8")
         typer.echo(f"Generated {brief_path}")
 
@@ -253,6 +259,252 @@ def hook(
 
 
 @app.command()
+def switch(
+    target: str = typer.Argument(..., help="Target agent (claude-code, codex-cli, opencode)"),
+    task: str = typer.Option(
+        "", "--task", "-t",
+        help="Task identifier (auto-generated if omitted)",
+    ),
+    notes: str = typer.Option(
+        "", "--notes", "-n",
+        help="Additional notes about current progress",
+    ),
+    project_dir: Path = typer.Option(
+        Path.cwd(), "--project-dir", "-d",
+        help="Project directory",
+    ),
+) -> None:
+    """Switch from current agent to target agent with context handoff."""
+    service = _get_service()
+    result = asyncio.run(service.switch(
+        target_agent=target,
+        task_id=task or None,
+        notes=notes,
+        project_dir=project_dir,
+    ))
+
+    if "error" in result:
+        typer.echo(f"Error: {result['error']}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"✓ Created handoff package: {result['package_id']}")
+    typer.echo(f"  From: {result['source_agent']} → To: {result['target_agent']}")
+    typer.echo(f"  Task: {result['task_id']}")
+
+    if result.get("injected_path"):
+        typer.echo(f"✓ Injected context into {result['injected_path']}")
+
+    project = Path(project_dir)
+
+    if is_inside_tmux():
+        # Tmux path: kill-recreate target window so the agent boots fresh
+        # and reads the latest injected context.
+        try:
+            _tmux_switch(target, project)
+        except Exception as exc:
+            typer.echo(f"tmux switch failed: {exc}", err=True)
+            raise typer.Exit(1)
+
+        typer.echo("")
+        typer.echo(f"Switched to {target} in tmux.")
+        typer.echo("Your screen should now show the target agent.")
+    else:
+        # Shell-hook path: write marker for precmd auto-exec
+        marker_path = write_switch_marker(result["launch_command"])
+        typer.echo("")
+        typer.echo(f"Switch marker written to {marker_path}")
+        typer.echo("")
+        typer.echo("To complete the switch:")
+        typer.echo("  1. Exit the current agent (Ctrl+D or /quit)")
+        typer.echo(f"  2. Your shell will automatically exec {result['target_agent']}")
+        typer.echo("")
+        typer.echo("If auto-switch doesn't work, run: handoff-relay install-shell-hook")
+
+
+@app.command()
+def install_shell_hook(
+    shell: str = typer.Option(
+        "auto", "--shell", "-s",
+        help="Shell type (auto, zsh, bash)",
+    ),
+    uninstall: bool = typer.Option(
+        False, "--uninstall", "-u",
+        help="Remove the hook instead of installing",
+    ),
+) -> None:
+    """Install the shell precmd hook for auto-switching agents.
+
+    The hook checks ~/.handoff/switch_cmd on every prompt and evals it,
+    which for an ``exec`` command replaces the shell with the target CLI.
+    """
+    import os
+
+    # Detect shell
+    if shell == "auto":
+        shell_path = os.environ.get("SHELL", "")
+        if "zsh" in shell_path:
+            shell = "zsh"
+        elif "bash" in shell_path:
+            shell = "bash"
+        else:
+            typer.echo(f"Could not auto-detect shell from SHELL={shell_path}", err=True)
+            typer.echo("Please specify with --shell zsh or --shell bash")
+            raise typer.Exit(1)
+
+    if shell == "zsh":
+        rc_file = Path.home() / ".zshrc"
+        hook_body = _ZSH_HOOK
+    elif shell == "bash":
+        rc_file = Path.home() / ".bashrc"
+        hook_body = _BASH_HOOK
+    else:
+        typer.echo(f"Unsupported shell: {shell}", err=True)
+        raise typer.Exit(1)
+
+    if not rc_file.exists():
+        typer.echo(f"Shell config not found: {rc_file}", err=True)
+        raise typer.Exit(1)
+
+    text = rc_file.read_text(encoding="utf-8")
+
+    # Remove existing hook block
+    text = _remove_hook_block(text)
+
+    if uninstall:
+        rc_file.write_text(text, encoding="utf-8")
+        typer.echo(f"Removed handoff-relay hook from {rc_file}")
+        typer.echo("Run `source {rc_file}` or restart your terminal to apply.")
+        return
+
+    # Append new hook block
+    new_text = text.rstrip() + "\n\n" + hook_body + "\n"
+    rc_file.write_text(new_text, encoding="utf-8")
+
+    typer.echo(f"✓ Installed handoff-relay hook into {rc_file}")
+    typer.echo("")
+    typer.echo("How it works:")
+    typer.echo("  1. Run 'handoff-relay switch codex-cli' inside Claude Code")
+    typer.echo("  2. Exit Claude Code (Ctrl+D)")
+    typer.echo("  3. Your shell prompt will automatically exec codex")
+    typer.echo("")
+    typer.echo(f"Run `source {rc_file}` or restart your terminal to activate.")
+
+
+_HOOK_START = "# <<< handoff-relay hook (begin) >>>"
+_HOOK_END = "# <<< handoff-relay hook (end) >>>"
+
+_ZSH_HOOK = f"""{_HOOK_START}
+handoff_precmd() {{
+    local marker="$HOME/.handoff/switch_cmd"
+    if [[ -f "$marker" ]]; then
+        local cmd
+        cmd=$(cat "$marker")
+        rm -f "$marker"
+        eval "$cmd"
+    fi
+}}
+autoload -U add-zsh-hook
+add-zsh-hook precmd handoff_precmd
+{_HOOK_END}"""
+
+_BASH_HOOK = f"""{_HOOK_START}
+__handoff_check() {{
+    local marker="$HOME/.handoff/switch_cmd"
+    if [[ -f "$marker" ]]; then
+        local cmd
+        cmd=$(cat "$marker")
+        rm -f "$marker"
+        eval "$cmd"
+    fi
+}}
+if [[ -z "$PROMPT_COMMAND" ]]; then
+    PROMPT_COMMAND='__handoff_check'
+else
+    PROMPT_COMMAND='__handoff_check; '"$PROMPT_COMMAND"
+fi
+{_HOOK_END}"""
+
+
+def _agent_binary(agent_type: str) -> str:
+    """Map agent type to CLI binary name."""
+    return {
+        "claude-code": "claude",
+        "codex-cli": "codex",
+        "opencode": "opencode",
+    }.get(agent_type, agent_type)
+
+
+def _tmux_window_exists(window_name: str) -> bool:
+    """Check if a tmux window exists in the current session."""
+    import subprocess
+
+    result = subprocess.run(
+        ["tmux", "list-windows", "-F", "#W"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False
+    existing = [w.strip() for w in result.stdout.split("\n") if w.strip()]
+    return window_name in existing
+
+
+def _tmux_switch(target_agent: str, project_dir: Path) -> None:
+    """Kill and recreate target tmux window with a fresh agent process.
+
+    This ensures the target agent always boots from scratch and reads the
+    latest injected context (AGENTS.md / CLAUDE.md).
+    """
+    import subprocess
+    import time
+
+    window_name = target_agent.replace("-cli", "").replace("-code", "")
+    binary = _agent_binary(target_agent)
+
+    # Kill existing window to force fresh start
+    if _tmux_window_exists(window_name):
+        subprocess.run(
+            ["tmux", "kill-window", "-t", window_name],
+            check=False,
+        )
+        time.sleep(0.3)
+
+    # Create new window with fresh agent
+    subprocess.run(
+        [
+            "tmux",
+            "new-window",
+            "-n",
+            window_name,
+            "-c",
+            str(project_dir),
+            binary,
+        ],
+        check=True,
+    )
+
+    # Switch to it immediately
+    subprocess.run(
+        ["tmux", "select-window", "-t", window_name],
+        check=True,
+    )
+
+
+def _remove_hook_block(text: str) -> str:
+    """Remove an existing handoff-relay hook block from shell rc text."""
+    while True:
+        start = text.find(_HOOK_START)
+        if start == -1:
+            break
+        end = text.find(_HOOK_END, start)
+        if end == -1:
+            break
+        end += len(_HOOK_END)
+        text = text[:start].rstrip() + text[end:].lstrip()
+    return text
+
+
+@app.command()
 def serve(
     mcp: bool = typer.Option(True, "--mcp/--no-mcp", help="Expose MCP tools"),
 ) -> None:
@@ -281,34 +533,6 @@ def _default_agents_md(agent: str) -> str:
 
 ## Primary Agent
 - Default agent: {agent}
-"""
-
-
-def _generate_brief_md_from_dict(package: dict[str, Any]) -> str:
-    """Generate a handoff-brief.md for generic target agents."""
-    task = package.get("task", {})
-    ps = task.get("progress_summary", {})
-    meta = package.get("meta", {})
-    completed = ps.get("completed_steps", [])
-    return f"""# Handoff Brief
-
-## Task
-{task.get("description", "N/A")}
-
-## Progress Summary
-- **Completed**: {', '.join(completed) if completed else 'N/A'}
-- **Current Step**: {ps.get('current_step') or 'N/A'}
-- **Key Results**: {ps.get('key_intermediate_results') or 'N/A'}
-- **Blockers**: {ps.get('blockers') or 'N/A'}
-- **Next Step**: {ps.get('next_expected_action') or 'N/A'}
-
-## Package ID
-`{meta.get('package_id', 'N/A')}`
-
-<handoff_context>
-You are resuming work from a previous agent session.
-Review the progress summary above and continue from the indicated next step.
-</handoff_context>
 """
 
 

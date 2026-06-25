@@ -54,6 +54,18 @@ class ClaudeCodeAdapter:
         """
         snapshot = self._parser.parse()
 
+        # Claude Code session files don't contain conversation history
+        # (only process state). When the snapshot is empty, elevate the
+        # user-provided notes so the package isn't blank.
+        if snapshot.messages:
+            current_step = snapshot.last_assistant_message or ""
+            key_results = snapshot.last_user_message or ""
+            blockers = notes
+        else:
+            current_step = notes or "Claude Code session"
+            key_results = ""
+            blockers = ""
+
         package = ContextPackage(
             meta=PackageMeta(
                 source=SourceInfo(agent_id="claude-code"),
@@ -61,11 +73,11 @@ class ClaudeCodeAdapter:
             ),
             task=TaskInfo(
                 original_task_id=task_id,
-                description=snapshot.current_task or "Claude Code session",
+                description=snapshot.current_task or notes or "Claude Code session",
                 progress_summary=ProgressSummary(
-                    current_step=snapshot.last_assistant_message or "",
-                    key_intermediate_results=snapshot.last_user_message or "",
-                    blockers=notes,
+                    current_step=current_step,
+                    key_intermediate_results=key_results,
+                    blockers=blockers,
                 ),
             ),
         )
@@ -249,6 +261,21 @@ Create a structured handoff package so another agent can continue this work.
    - `notes`: brief summary of completed work and next steps
 4. Report the package ID to the user.
 5. If MCP tools are unavailable, write a handoff summary to `handoff-brief.md` in the project root.
+
+## /handoff-to <agent>
+Switch to another CLI agent with automatic context transfer.
+
+Supported targets: `codex`, `opencode`
+
+### Instructions
+1. Ask the user: "Shall I switch to <agent> and transfer the current context?"
+2. Call the `handoff_switch` MCP tool with:
+   - `target_agent`: "codex-cli" or "opencode"
+   - `notes`: brief summary of current progress
+3. Report the switch result to the user, including:
+   - The handoff package ID
+   - The command to launch the target agent
+   - Confirmation that context has been injected
 """
 
     def write_handoff_command(self, project_dir: Path | str) -> Path:
